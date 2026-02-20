@@ -133,6 +133,7 @@ const BackgroundManager = {
  */
 const API_KEY = import.meta.env.VITE_OPENWEATHER_API_KEY || '';
 const API_BASE_URL = 'https://api.openweathermap.org/data/2.5/weather';
+const GEO_API_URL = 'https://api.openweathermap.org/geo/1.0/direct';
 const TIME_API_URL = 'https://www.timeapi.io/api/Time/current/coordinate';
 
 // Show warning if API key is not configured
@@ -236,22 +237,30 @@ async function handleSearch() {
     weatherCard.classList.remove('loaded');
 
     try {
-        // Fetch weather data from OpenWeatherMap API
-        const weatherData = await getWeatherData(city);
+        // Step 1: Resolve location using Geocoding API
+        const location = await geocodeLocation(city);
+
+        if (!location) {
+            showError('Location not found. Please check the spelling and try again.');
+            weatherCard.classList.add('hidden');
+            return;
+        }
+
+        // Step 2: Fetch weather data using coordinates
+        const weatherData = await getWeatherData(location);
 
         if (weatherData) {
             const timeData = await getTimeData(weatherData.coordinates);
 
             // Display the weather data
-            displayWeather(city, weatherData);
+            displayWeather(weatherData);
             updateLocalTime(timeData.timeText);
             updateBackground(weatherData.condition, timeData.hour);
 
             // Mark card as loaded (hides loader, shows content)
             weatherCard.classList.add('loaded');
         } else {
-            // API returned empty or error response
-            showError(`City not found: "${city}". Please check the spelling and try again.`);
+            showError('Location not found. Please check the spelling and try again.');
             weatherCard.classList.add('hidden');
         }
     } catch (error) {
@@ -260,8 +269,8 @@ async function handleSearch() {
         
         let errorMsg = 'Error fetching weather data';
         
-        if (error.message === 'City not found') {
-            errorMsg = `City not found: "${city}". Please check the spelling and try again.`;
+        if (error.message === 'Location not found') {
+            errorMsg = 'Location not found. Please check the spelling and try again.';
         } else if (error.message === 'Network error') {
             errorMsg = 'Network error. Please check your internet connection.';
         } else if (error.message === 'Invalid API key') {
@@ -277,20 +286,79 @@ async function handleSearch() {
 //  WEATHER DATA RETRIEVAL FROM API
 // ==========================================
 /**
+ * Resolves user input to a best-match location using OpenWeather Geocoding API
+ * API Endpoint: https://api.openweathermap.org/geo/1.0/direct
+ * 
+ * @param {string} query - City, state, country, or mixed text
+ * @returns {Promise<object|null>} Location object or null if not found
+ * 
+ * @async
+ */
+async function geocodeLocation(query) {
+    try {
+        const url = new URL(GEO_API_URL);
+        url.searchParams.append('q', query);
+        url.searchParams.append('limit', '5');
+        url.searchParams.append('appid', API_KEY);
+
+        const response = await fetch(url.toString());
+
+        if (!response.ok) {
+            if (response.status === 401) {
+                throw new Error('Invalid API key');
+            }
+
+            throw new Error(`API Error: ${response.status}`);
+        }
+
+        const results = await response.json();
+
+        if (!Array.isArray(results) || results.length === 0) {
+            return null;
+        }
+
+        const best = results[0];
+        const locationName = [best.name, best.state, best.country]
+            .filter(Boolean)
+            .join(', ');
+
+        return {
+            name: best.name,
+            state: best.state || '',
+            country: best.country || '',
+            lat: best.lat,
+            lon: best.lon,
+            displayName: locationName
+        };
+    } catch (error) {
+        if (error.message.includes('Invalid API key') || error.message.includes('API Error')) {
+            throw error;
+        }
+
+        if (error instanceof TypeError) {
+            throw new Error('Network error');
+        }
+
+        throw error;
+    }
+}
+
+/**
  * Fetches real weather data from OpenWeatherMap API
  * API Endpoint: https://api.openweathermap.org/data/2.5/weather
  * 
- * @param {string} city - City name to search for
+ * @param {object} location - Location object with lat/lon
  * @returns {Promise<object|null>} Weather data object or null if not found
  * @throws {Error} Throws error for network issues or invalid API key
  * 
  * @async
  */
-async function getWeatherData(city) {
+async function getWeatherData(location) {
     try {
         // Build API URL with query parameters
         const url = new URL(API_BASE_URL);
-        url.searchParams.append('q', city);              // City name
+        url.searchParams.append('lat', location.lat);
+        url.searchParams.append('lon', location.lon);
         url.searchParams.append('appid', API_KEY);       // API key
         url.searchParams.append('units', 'metric');      // Use Celsius
 
@@ -299,9 +367,7 @@ async function getWeatherData(city) {
 
         // Handle HTTP error responses
         if (!response.ok) {
-            if (response.status === 404) {
-                throw new Error('City not found');
-            } else if (response.status === 401) {
+            if (response.status === 401) {
                 throw new Error('Invalid API key');
             } else {
                 throw new Error(`API Error: ${response.status}`);
@@ -318,6 +384,7 @@ async function getWeatherData(city) {
             humidity: data.main.humidity,
             windSpeed: Math.round(data.wind.speed),
             icon: weatherIconMap[data.weather[0].main] || '🌤️',
+            locationName: location.displayName,
             coordinates: {
                 lat: data.coord.lat,
                 lon: data.coord.lon
@@ -328,8 +395,7 @@ async function getWeatherData(city) {
 
     } catch (error) {
         // Re-throw custom errors
-        if (error.message.includes('City not found') || 
-            error.message.includes('Invalid API key') || 
+        if (error.message.includes('Invalid API key') || 
             error.message.includes('API Error')) {
             throw error;
         }
@@ -349,18 +415,11 @@ async function getWeatherData(city) {
 // ==========================================
 /**
  * Displays the fetched weather data on the card
- * @param {string} city - City name
  * @param {object} data - Weather data object with temperature, condition, humidity, windSpeed, icon
  */
-function displayWeather(city, data) {
-    // Capitalize city name for display
-    const cityDisplayName = city
-        .split(' ')
-        .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-        .join(' ');
-
+function displayWeather(data) {
     // Update all weather card elements with data from API
-    cityName.textContent = cityDisplayName;
+    cityName.textContent = data.locationName || 'Unknown location';
     temperature.textContent = data.temperature;
     weatherIcon.textContent = data.icon;
     weatherCondition.textContent = data.condition;
@@ -379,13 +438,13 @@ function displayWeather(city, data) {
  * API Endpoint: https://www.timeapi.io/api/Time/current/coordinate
  * 
  * @param {object} coordinates - { lat, lon }
- * @returns {Promise<object>} { timeText, phase }
+ * @returns {Promise<object>} { timeText, hour }
  * 
  * @async
  */
 async function getTimeData(coordinates) {
     if (!coordinates || typeof coordinates.lat !== 'number' || typeof coordinates.lon !== 'number') {
-        return { timeText: '', phase: 'day' };
+        return { timeText: '', hour: null };
     }
 
     try {
